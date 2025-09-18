@@ -1,45 +1,74 @@
 import logging
+from typing import List, Optional
+from asyncpraw.models import Comment, MoreComments
 
-from .base import reddit_get, PostDetails, CommentInfo
+
+from .base import RedditClient, PostDetails, CommentInfo
 
 logger = logging.getLogger(__name__)
 
 
-async def get_post_and_top_comments(post_id: str, subreddit: str) -> PostDetails:
-    """Gets post and comment details via the Reddit API and cleans the data."""
-    params = {"limit": 3, "sort": "top", "raw_json": 1}
+async def _fetch_comments_recursive(
+    comments: List[Comment | MoreComments], 
+    depth: int, 
+    limit: int, 
+    current_depth: int = 1
+) -> List[CommentInfo]:
+    """Recursively fetch comments up to a specified depth."""
+    if current_depth > depth or not comments:
+        return []
 
-    logger.info(f"Making API call to Reddit for comments on post '{post_id}' in subreddit '{subreddit}'")
-    # Use the comments endpoint directly - this is the correct Reddit API pattern
-    data = await reddit_get(f"/comments/{post_id}", params=params)
-    
-    # Reddit returns an array: [post_listing, comments_listing]
-    # First element contains the post data, second contains comments
-    if len(data) < 2:
-        raise ValueError("Invalid response structure from Reddit API")
-    
-    post_listing = data[0]["data"]["children"]
-    comments_listing = data[1]["data"]["children"]
-    
-    if not post_listing:
-        raise ValueError(f"Post with ID '{post_id}' not found")
-    
-    post_data = post_listing[0]["data"]
-
-    # Here we assemble our final, nested PostDetails object from the raw API data.
-    return PostDetails(
-        title=post_data["title"],
-        author=post_data["author"],
-        text=post_data.get("selftext", "[This post has no text content]"),
-        score=post_data["score"],
-        top_comments=[
+    results: List[CommentInfo] = []
+    for comment in comments:
+        if isinstance(comment, MoreComments):
+            continue
+        
+        results.append(
             CommentInfo(
-                author=comment["data"].get("author", "[deleted]"),
-                text=comment["data"].get("body", ""),
-                score=comment["data"].get("score", 0),
+                author=getattr(comment, 'author', '[deleted]'),
+                text=comment.body,
+                score=comment.score,
             )
-            # We add a small check to filter out any empty or deleted comments.
-            for comment in comments_listing 
-            if comment.get("data", {}).get("body") and comment["data"].get("author") != "[deleted]"
-        ],
+        )
+        if len(results) >= limit:
+            return results
+        
+        if hasattr(comment, "replies"):
+            replies = await _fetch_comments_recursive(
+                comment.replies, depth, limit - len(results), current_depth + 1
+            )
+            results.extend(replies)
+        
+        if len(results) >= limit:
+            return results
+            
+    return results
+
+
+async def get_post_and_top_comments(
+    post_id: str, 
+    limit: int = 10, 
+    sort: str = "top",
+    depth: Optional[int] = 2
+) -> PostDetails:
+    """Gets post and comment details using PRAW, with controllable depth."""
+    logger.info(f"Fetching post and comments for submission ID: {post_id} with depth={depth}")
+    reddit = await RedditClient.get_instance()
+    
+    submission = await reddit.submission(id=post_id)
+    await submission.load()
+    
+    submission.comment_sort = sort
+    
+    # Replace MoreComments objects to allow traversal
+    await submission.comments.replace_more(limit=None)
+    
+    all_comments = await _fetch_comments_recursive(submission.comments, depth, limit)
+
+    return PostDetails(
+        title=submission.title,
+        author=getattr(submission, 'author', '[deleted]'),
+        text=submission.selftext or "[This post has no text content]",
+        score=submission.score,
+        top_comments=all_comments,
     )

@@ -7,11 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY mcp_servers/reddit_search/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY mcp_servers/reddit_search/server.py .
-COPY mcp_servers/reddit_search/tools/ ./tools/
+COPY server.py .
+COPY tools/ ./tools/
 
 # Expose the port the server runs on
 EXPOSE 5001
